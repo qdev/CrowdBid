@@ -1,3 +1,5 @@
+assets/external/
+.web
 # Reflex spezifische Dateien
 .web/
 __pycache__/

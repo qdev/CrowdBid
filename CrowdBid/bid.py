@@ -2,6 +2,8 @@ from datetime import datetime
 import reflex as rx
 import sqlalchemy
 from sqlmodel import select
+
+from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
 
 
@@ -9,8 +11,11 @@ from CrowdBid.models import Auction, Bid
 
 class BidState(rx.State):
     bids: list[dict] = []
-    max_round: int = 0
+    actual_round: int = 1
+    round_complete: bool = True
     auction: Auction = None
+    round_headers: list[str] = []
+    round_keys: list[str] = []
 
     @rx.var
     def auction_token(self) -> str:
@@ -18,16 +23,8 @@ class BidState(rx.State):
         return self.router.page.params.get("token", "")
 
     @rx.var
-    def round_headers(self) -> list[str]:
-        return [f"Round {i}" for i in range(1, self.max_round + 1)]
-
-    @rx.var
-    def round_keys(self) -> list[str]:
-        return [f"round{i}" for i in range(1, self.max_round + 1)]
-
-    @rx.var
     def last_round_key(self) -> str:
-        return f"round{self.max_round}" if self.max_round > 0 else ""
+        return f"round{self.actual_round}" if self.actual_round > 0 else ""
 
     @rx.event
     def add_bidder(self, form_data: dict):
@@ -36,7 +33,7 @@ class BidState(rx.State):
         with rx.session() as session:
             new_bid = Bid(**form_data)
             new_bid.ida = self.auction.id
-            new_bid.round = self.max_round
+            new_bid.round = self.actual_round - 1 if self.round_complete else self.actual_round
             session.add(new_bid)
             session.commit()
             session.refresh(new_bid)
@@ -55,7 +52,7 @@ class BidState(rx.State):
                     ),
                     {
                         "name": form_data["name"],
-                        "round": self.max_round,
+                        "round": self.actual_round,
                         "bid": float(form_data["bid"]),
                         "ida": self.auction.id
                     }
@@ -64,7 +61,6 @@ class BidState(rx.State):
 
             # Tabelle neu laden
             self.load_bids()
-
 
     @rx.event
     def load_bids(self):
@@ -75,23 +71,35 @@ class BidState(rx.State):
             all_bids = session.exec(query).all()
 
             bid_dict = {}
-            rounds = set()
+            sum = {}
 
             for bid in all_bids:
                 if bid.name not in bid_dict:
                     bid_dict[bid.name] = {}
                 bid_dict[bid.name][f"round{bid.round}"] = bid.bid
-                rounds.add(bid.round)
+                sum[bid.round] = sum.get(bid.round, 0) + bid.bid
 
-            self.max_round = max(rounds) if rounds else 0
+            if all_bids:
+                self.actual_round = len(sum)
+                self.round_complete = True
+            else:
+                self.actual_round = 1
+                self.round_complete = False
 
             transformed_bids = []
             for name, rounds_data in bid_dict.items():
+                if f"round{self.actual_round}" not in rounds_data:
+                    self.round_complete = False
                 row = {"name": name}
                 row.update(rounds_data)
                 transformed_bids.append(row)
-
             self.bids = transformed_bids
+
+            if self.round_complete:
+                self.actual_round += 1
+
+            self.round_headers = [f"Σ = {sum.get(i, 0)}" for i in range(1, self.actual_round)] + [f"Round {self.actual_round}"]
+            self.round_keys = [f"round{i}" for i in range(1, self.actual_round)]
 
 
 ### FRONTEND ###
@@ -132,6 +140,7 @@ def bid_ui():
     Seite für die Anzeige der Bids einer Auktion.
     """
     return rx.vstack(
+        header(),
         rx.heading(BidState.auction.topic),
         rx.text(BidState.auction.description),
         rx.divider(),
@@ -139,7 +148,7 @@ def bid_ui():
         add_bidder_dialog(),
         width="100%",
         spacing="6",
-        padding_x=["1.5em", "1.5em", "3em"],
+        padding="0.7rem"
     )
 
 
@@ -189,12 +198,12 @@ def bid_table():
     return rx.table.root(
         rx.table.header(
             rx.table.row(
-                rx.table.column_header_cell("Name"),
+                rx.table.column_header_cell("Sum:"),
                 rx.foreach(
                     BidState.round_headers,
                     lambda round_name: rx.table.column_header_cell(round_name)
                 ),
-                rx.table.column_header_cell("Action")
+                rx.table.column_header_cell("")
             )
         ),
         rx.table.body(
@@ -205,6 +214,12 @@ def bid_table():
                     rx.foreach(
                         BidState.round_keys,
                         lambda round_key: rx.table.cell(bid.get(round_key, "-"))
+                    ),
+                    rx.table.cell(rx.cond(
+                        bid.contains(BidState.last_round_key),
+                            rx.icon("circle-check-big", color="green"),
+                            rx.icon("circle",color="grey")
+                        )
                     ),
                     rx.table.cell(
                         rx.dialog.root(

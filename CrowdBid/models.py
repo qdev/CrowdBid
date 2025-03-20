@@ -11,7 +11,7 @@ class Auction(rx.Model, table=True):
     config_token: str = sqlmodel.Field(max_length=16, unique=True)
     create_at: datetime
     update_at: datetime
-    delete_on: datetime
+    expiration: datetime = sqlmodel.Field(default=None)
     topic: str = sqlmodel.Field(default=None)
     description: str = sqlmodel.Field(default=None)
     target_bid: float = sqlmodel.Field(default=None)

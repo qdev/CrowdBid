@@ -4,6 +4,7 @@ import sqlmodel
 import secrets
 from sqlmodel import select
 
+from CrowdBid.components import header
 from CrowdBid.models import Auction
 
 
@@ -11,6 +12,7 @@ from CrowdBid.models import Auction
 
 class CreateAuctionState(rx.State):
     """Der App-Status."""
+    in_90_days :str = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
 
     def create_auction(self, form_data: dict):
         """Erstellt eine neue Auktion."""
@@ -26,13 +28,14 @@ class CreateAuctionState(rx.State):
             "config_token": config_token,
             "create_at": now,
             "update_at": now,
-            "delete_on": now + timedelta(days=90),
+            "expiration": datetime.strptime(form_data.get("expiration"), "%Y-%m-%d"),
             "topic": form_data.get("topic"),
             "description": form_data.get("description"),
             "target_bid": float(form_data.get("target_bid", 0))
         }
 
         with rx.session() as session:
+
             new_auction = Auction(**auction_data)
             session.add(new_auction)
             session.commit()
@@ -46,6 +49,7 @@ class CreateAuctionState(rx.State):
 def create_auction_ui():
     """Formular zum Erstellen einer Auktion."""
     return rx.vstack(
+        header(),
         rx.form(
             rx.vstack(
                 rx.input(
@@ -63,10 +67,16 @@ def create_auction_ui():
                     name="target_bid",
                     required=True
                 ),
+                rx.input(
+                    name="expiration",
+                    default_value=CreateAuctionState.in_90_days,
+                    type="date",
+                ),
                 rx.button("Erstellen", type_="submit")
             ),
             on_submit=CreateAuctionState.create_auction,
             reset_on_submit=True,
         ),
         spacing="4",
+        padding="0.7rem"
     )

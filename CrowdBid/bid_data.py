@@ -3,6 +3,8 @@ from typing import List
 import reflex as rx
 import sqlmodel
 from sqlmodel import select
+
+from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
 
 ### BACKEND ###
@@ -89,13 +91,15 @@ def data_bid_ui():
     Seite für die Anzeige der Bids einer Auktion.
     """
     return rx.vstack(
+        header(),
         rx.heading(f"DATA: {DataBidState.auction.topic}"),
         rx.box(bid_table(), width="100%", border_width="1px", border_color="#444444", border_radius="20px"),
         bid_form(),
         on_mount=DataBidState.load_entries,
         width="100%",
         spacing="6",
-        padding_x=["1.5em", "1.5em", "3em"],
+        #padding_x=["1.5em", "1.5em", "3em"],
+        padding="0.7rem"
     )
 
 
