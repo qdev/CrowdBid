@@ -1,10 +1,10 @@
 # CrowdBid
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+ * python3 -m venv .venv 
+ * source .venv/bin/activate 
+ * pip install -r requirements.txt
 
-reflex db init
-reflex db migrate
+ * reflex db init
+ * reflex db migrate
 
-reflex run --loglevel debug
+ * reflex run --loglevel debug
