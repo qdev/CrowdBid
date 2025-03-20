@@ -1,0 +1,38 @@
+# Reflex spezifische Dateien
+.web/
+__pycache__/
+*.py[cod]
+.states
+alembic
+alembic.ini
+*.db
+
+
+# PyCharm spezifische Dateien
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# Virtuelle Umgebung
+venv/
+env/
+
+# Andere Python-bezogene Dateien
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
