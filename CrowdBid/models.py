@@ -1,8 +1,6 @@
 from datetime import datetime, timedelta
 import reflex as rx
 import sqlmodel
-import secrets
-from sqlmodel import select
 
 
 class Auction(rx.Model, table=True):
@@ -18,7 +16,6 @@ class Auction(rx.Model, table=True):
 
 
 class Bid(rx.Model, table=True):
-    # Explizit das ID-Feld definieren
     ida: int = sqlmodel.Field(default=None, primary_key=True)
     name: str = sqlmodel.Field(default=None, primary_key=True)
     round: int = sqlmodel.Field(default=None, primary_key=True)

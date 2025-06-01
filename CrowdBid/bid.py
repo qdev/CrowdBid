@@ -1,8 +1,9 @@
+import asyncio
 from datetime import datetime
 import reflex as rx
 import sqlalchemy
-from sqlmodel import select
-
+import websockets
+from sqlmodel import select, update
 from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
 
@@ -12,14 +13,51 @@ from CrowdBid.models import Auction, Bid
 class BidState(rx.State):
     bids: list[dict] = []
     actual_round: int = 1
-    round_complete: bool = True
+    status: str = ""
     auction: Auction = None
-    round_headers: list[str] = []
-    round_keys: list[str] = []
+    rounds: list[int] = []
+    sums: list[float] = []
+    # round_keys: list[str] = []
+    error: str = ""
+    hidden: bool = True
+    missing: int
+    neuer_name: str = ""
+    show_add_input: bool = False
+    hovered_name: str = ""
+    editing_name: str = ""
+    editing_value_name: str = ""
+    is_valid_bid: bool = False
+
+    def reset_bid_validation(self):
+        self.is_valid_bid = False
+
+    @rx.event(background=True)
+    async def ws_listener(self):
+        while True:
+            try:
+                async with websockets.connect("ws://localhost:28765") as ws:
+                    async for message in ws:
+                        async with self:
+                            self.load_bids()
+            except Exception:
+                await asyncio.sleep(2)
+
+    @rx.event(background=True)
+    async def send_ws(self):
+        try:
+            async with websockets.connect("ws://localhost:28765") as ws:
+                await ws.send("notify")
+        except Exception:
+            pass
+
+    @rx.event
+    def toggle_hidden(self):
+        self.hidden = not self.hidden
+        self.status += "."
+        return BidState.send_ws()
 
     @rx.var
     def auction_token(self) -> str:
-        """Get the token from the URL parameters."""
         return self.router.page.params.get("token", "")
 
     @rx.var
@@ -27,21 +65,25 @@ class BidState(rx.State):
         return f"round{self.actual_round}" if self.actual_round > 0 else ""
 
     @rx.event
-    def add_bidder(self, form_data: dict):
-        """Add a new bidder"""
-        form_data["time"] = datetime.now()
+    def add_bidder(self, name: str):
         with rx.session() as session:
-            new_bid = Bid(**form_data)
-            new_bid.ida = self.auction.id
-            new_bid.round = self.actual_round - 1 if self.round_complete else self.actual_round
-            session.add(new_bid)
+            session.add(Bid(name=name, round=0, bid=0, ida=self.auction.id, time=datetime.now()))
             session.commit()
-            session.refresh(new_bid)
-        self.load_bids()
+            self.load_bids()
 
     @rx.event
     def handle_bid(self, form_data: dict):
-        if "bid" in form_data:
+        self.is_valid_bid = False
+        try:
+            if "bid" not in form_data or not form_data["bid"]:
+                self.error = "Bitte geben Sie ein Gebot ein"
+                return
+
+            bid_value = float(form_data["bid"])
+            if bid_value <= 0:
+                self.error = "Das Gebot muss größer als 0 sein"
+                return
+
             with rx.session() as session:
                 session.execute(
                     sqlalchemy.text(
@@ -53,144 +95,262 @@ class BidState(rx.State):
                     {
                         "name": form_data["name"],
                         "round": self.actual_round,
-                        "bid": float(form_data["bid"]),
+                        "bid": bid_value,
                         "ida": self.auction.id
                     }
                 )
                 session.commit()
 
-            # Tabelle neu laden
+            self.error = ""
+            return BidState.send_ws()
+
+        except ValueError:
+            self.error = "Bitte geben Sie eine gültige Zahl ein"
+        except Exception as e:
+            self.error = f"Ein Fehler ist aufgetreten: {str(e)}"
             self.load_bids()
 
     @rx.event
     def load_bids(self):
-        with rx.session() as session:
+        with (rx.session() as session):
             self.auction = session.exec(select(Auction).where(Auction.token == self.auction_token)).first()
-            # Alle Bids aus der Datenbank holen
-            query = select(Bid)
-            all_bids = session.exec(query).all()
+            if self.auction is None:
+                return rx.redirect("/404")
+
+            all_bids = session.exec(select(Bid).where(Bid.ida == self.auction.id)).all()
 
             bid_dict = {}
-            sum = {}
+            bid_sum = {}
 
             for bid in all_bids:
                 if bid.name not in bid_dict:
                     bid_dict[bid.name] = {}
-                bid_dict[bid.name][f"round{bid.round}"] = bid.bid
-                sum[bid.round] = sum.get(bid.round, 0) + bid.bid
+                bid_dict[bid.name][bid.round] = bid.bid
+                bid_sum[bid.round] = bid_sum.get(bid.round, 0) + bid.bid
 
-            if all_bids:
-                self.actual_round = len(sum)
-                self.round_complete = True
-            else:
-                self.actual_round = 1
-                self.round_complete = False
-
-            transformed_bids = []
-            for name, rounds_data in bid_dict.items():
-                if f"round{self.actual_round}" not in rounds_data:
-                    self.round_complete = False
-                row = {"name": name}
-                row.update(rounds_data)
-                transformed_bids.append(row)
-            self.bids = transformed_bids
-
-            if self.round_complete:
+            self.bids = [{"name": k} | v for k, v in bid_dict.items()]
+            self.actual_round = len(bid_sum) - 1
+            self.missing = sum([0 if len(bid_sum) - 1 in x else 1 for x in self.bids])
+            if self.missing == 0:
                 self.actual_round += 1
+                self.missing = len(self.bids)
 
-            self.round_headers = [f"Σ = {sum.get(i, 0)}" for i in range(1, self.actual_round)] + [f"Round {self.actual_round}"]
-            self.round_keys = [f"round{i}" for i in range(1, self.actual_round)]
+            if self.actual_round < 2:
+                self.status = f"Es sind {self.auction.target_bid} € aufzubringen. Durch Klicken auf das \uFF0B können neue Bietende hinzugefügt werden."
+            else:
+                s = bid_sum[self.actual_round - 1]
+                if self.auction.target_bid > s:
+                    self.status = f"Es sind {self.auction.target_bid} € aufzubringen. In der Letzten Runde wurden davon {s / self.auction.target_bid * 100:.1f} % erreicht. Es Fehlen noch {self.auction.target_bid - s} €"
+                else:
+                    self.status = f"Es waren {self.auction.target_bid} € aufzubringen. Es sind zusätzlich {s - self.auction.target_bid} € geboten worden"
+            self.rounds = list(range(1, self.actual_round))
+            self.sums = [float(bid_sum.get(i, 0)) if bid_sum.get(i, 0).is_integer() else bid_sum.get(i, 0) for i in
+                         range(1, self.actual_round)]
+            # self.round_keys = [f"round{i}" for i in range(1, self.actual_round)]
+
+    @rx.event
+    def rename_bidder(self, name_alt: str, name_neu: str):
+        with rx.session() as session:
+            if not session.exec(select(Bid).where((Bid.ida == self.auction.id) & (Bid.name == name_neu))).first():
+                session.exec(update(Bid).where((Bid.ida == self.auction.id) & (
+                        Bid.name == name_alt)).values(name=name_neu))
+                session.commit()
+
+    @rx.event
+    def add_name(self):
+        if self.neuer_name.strip():
+            self.add_bidder(self.neuer_name.strip())
+            self.neuer_name = ""
+            self.show_add_input = False
+
+    @rx.event
+    def show_add(self):
+        self.cancel_edit_name()
+        self.show_add_input = True
+        self.neuer_name = ""
+
+    @rx.event
+    def cancel_add(self):
+        self.show_add_input = False
+        self.neuer_name = ""
+
+    @rx.event
+    def start_edit_name(self, name: str):
+        self.editing_name = name
+        self.editing_value_name = name
+        self.show_add_input = False
+
+    @rx.event
+    def cancel_edit_name(self):
+        self.editing_name = ""
+        self.editing_value_name = ""
+        self.hovered_name = ""
+
+    @rx.event
+    def confirm_edit_name(self):
+        if self.editing_value_name.strip():
+            self.rename_bidder(self.editing_name, self.editing_value_name)
+            self.editing_name = ""
+            self.editing_value_name = ""
+            self.hovered_name = ""
+            self.load_bids()
+
+    @rx.event
+    def validate_bid(self, value: str):
+        try:
+            if value and float(value) >= 0:
+                self.is_valid_bid = True
+            else:
+                self.is_valid_bid = False
+        except ValueError:
+            self.is_valid_bid = False
 
 
 ### FRONTEND ###
 
-def bid_dialog(name: str):
+@rx.page(route="/[token]/bid", on_load=BidState.ws_listener)
+def bid_ui():
+    return rx.vstack(
+        header(BidState),
+        rx.card(
+            rx.vstack(
+                rx.heading(BidState.auction.topic, size="6"),
+                rx.divider(),
+                rx.text(BidState.auction.description),
+                spacing="4",
+            ),
+            width="100%",
+            max_width="1000px",
+            padding="6",
+        ),
+        rx.card(
+            rx.vstack(
+                rx.heading("Status", size="1"),
+                rx.divider(),
+                rx.text(BidState.status),
+                spacing="4",
+            ),
+            width="100%",
+            max_width="1000px",
+            padding="6",
+        ),
+        rx.card(
+            rx.vstack(
+                rx.heading("Gebote", size="1"),
+                rx.divider(),
+                bid_table(),
+                spacing="4",
+            ),
+            width="100%",
+            max_width="1000px",
+            padding="6",
+        ),
+        rx.spacer(),
+        rx.el.hr(width="100%"),
+        width="100%",
+        spacing="6",
+        align_items="center",
+        padding="2em",
+    )
+
+
+def bid_dialog(name: str, add: bool):
     return rx.dialog.content(
         rx.dialog.title("Gebot eingeben"),
         rx.form(
-            rx.vstack(
+            rx.flex(
                 rx.el.input(
                     name="name",
                     hidden=True,
                     value=name,
                 ),
-                rx.input(
-                    placeholder="Bid",
-                    name="bid",
-                    type_="number",
-                    required=True,
-                ),
-                rx.hstack(
-                    rx.dialog.close(
-                        rx.button("Cancel")
+                rx.vstack(
+                    rx.input(
+                        placeholder="0.00",
+                        name="bid",
+                        # type="number",
+                        # required=True,
+                        min="0.01",
+                        step="0.01",
+                        size="3",
+                        on_change=BidState.validate_bid,
                     ),
-                    rx.dialog.close(
-                        rx.button("Submit", type="submit")
-                    ),
+                    rx.cond(add and BidState.missing == 1,
+                            rx.text("Achtung! Dieses Gebot schließt die Runde ab. Ein Ändern ist dan nicht mehr möglich.", color="red")),
+                    align_items="start",
                 ),
+                rx.flex(
+                    rx.dialog.close(
+                        rx.button(
+                            "Abbrechen",
+                            variant="soft",
+                            size="2",
+                        ),
+                    ),
+                    rx.cond(
+                        BidState.is_valid_bid,
+                        rx.dialog.close(
+                            rx.button(
+                                "Bieten",
+                                type="submit",
+                                size="2",
+                                color_scheme="grass",
+                            ),
+                        ),
+                        rx.button(
+                            "Bieten",
+                            type="submit",
+                            size="2",
+                            color_scheme="gray",
+                            is_disabled=True,
+                        ),
+                    ),
+                    spacing="3",
+                    justify="end",
+                ),
+                direction="column",
+                spacing="4",
             ),
             on_submit=BidState.handle_bid,
         ),
+        max_width="400px",
     )
 
 
-@rx.page(route="/[token]/bid")
-def bid_ui():
-    """
-    Seite für die Anzeige der Bids einer Auktion.
-    """
-    return rx.vstack(
-        header(),
-        rx.heading(BidState.auction.topic),
-        rx.text(BidState.auction.description),
-        rx.divider(),
-        rx.box(bid_table(), width="100%", border_width="1px", border_color="#444444", border_radius="20px"),
-        add_bidder_dialog(),
-        width="100%",
-        spacing="6",
-        padding="0.7rem"
-    )
-
-
-def add_bidder_dialog():
-    return rx.dialog.root(
-        rx.dialog.trigger(
-            rx.button(
-                rx.hstack(
-                    rx.icon("plus"),
-                    rx.text("Add Bidder"),
-                ),
+def bidder(name):
+    return rx.cond(
+        BidState.editing_name == name,
+        rx.hstack(
+            rx.input(
+                value=BidState.editing_value_name,
+                on_change=BidState.set_editing_value_name,
+                auto_focus=True,
             ),
+            rx.icon("check", on_click=BidState.confirm_edit_name, color="green"),
+            rx.icon("x", on_click=BidState.cancel_edit_name, color="red"),
         ),
-        rx.dialog.content(
-            rx.vstack(
-                rx.dialog.title("New Bidder"),
-                rx.form(
-                    rx.vstack(
-                        rx.input(
-                            placeholder="Name",
-                            name="name",
-                            required=True,
-                        ),
-                        rx.input(
-                            placeholder="Bid",
-                            name="bid",
-                            type="number",
-                            required=True,
-                        ),
-                        rx.hstack(
-                            rx.dialog.close(
-                                rx.button("Cancel")
-                            ),
-                            rx.dialog.close(
-                                rx.button("Bid", type="submit")
-                            ),
-                        ),
+        rx.hstack(
+            rx.box(
+                rx.text(
+                    name,
+                    on_click=lambda: BidState.start_edit_name(name),
+                    style={"cursor": "pointer"},
+                ),
+                rx.cond(
+                    (BidState.hovered_name == name) | (BidState.editing_name == name),
+                    rx.icon(
+                        "pencil",
+                        size=12,
+                        on_click=lambda: BidState.start_edit_name(name),
+                        style={"margin_left": "2px", "vertical_align": "middle"},
                     ),
-                    on_submit=BidState.add_bidder,
                 ),
+                on_mouse_enter=lambda: BidState.set_hovered_name(name),
+                on_mouse_leave=lambda: BidState.set_hovered_name(""),
+                style={"display": "inline-flex", "align_items": "center"},
             ),
-        ),
+            align="center",
+        )
     )
 
 
@@ -198,49 +358,113 @@ def bid_table():
     return rx.table.root(
         rx.table.header(
             rx.table.row(
-                rx.table.column_header_cell("Sum:"),
-                rx.foreach(
-                    BidState.round_headers,
-                    lambda round_name: rx.table.column_header_cell(round_name)
+                rx.table.column_header_cell(
+                    "Runde:",
                 ),
-                rx.table.column_header_cell("")
+
+                rx.foreach(
+                    BidState.rounds,
+                    lambda r: rx.table.column_header_cell(f"R{r}", vertical_align="middle")
+                ),
+                rx.cond(
+                    BidState.bids.length() > 1,
+                    rx.table.column_header_cell(
+                        f"R{BidState.actual_round}",
+                    ),
+                ),
             )
         ),
         rx.table.body(
             rx.foreach(
                 BidState.bids,
                 lambda bid: rx.table.row(
-                    rx.table.cell(bid["name"]),
-                    rx.foreach(
-                        BidState.round_keys,
-                        lambda round_key: rx.table.cell(bid.get(round_key, "-"))
+                    rx.table.cell(
+                        bidder(bid["name"]),
+                        vertical_align="middle"
                     ),
-                    rx.table.cell(rx.cond(
-                        bid.contains(BidState.last_round_key),
-                            rx.icon("circle-check-big", color="green"),
-                            rx.icon("circle",color="grey")
+                    rx.foreach(
+                        BidState.rounds,
+                        lambda r: rx.table.cell(rx.cond(
+                            BidState.hidden,
+                            rx.icon("eye-off", color="gray", size=16),
+                            rx.text(bid.get(r, "-"))),
+                            vertical_align="middle"
                         )
                     ),
-                    rx.table.cell(
-                        rx.dialog.root(
-                            rx.dialog.trigger(
-                                rx.button(
-                                    rx.cond(
-                                        bid.contains(BidState.last_round_key),
-                                        "Change",
-                                        "Bid"
+                    rx.cond(
+                        BidState.bids.length() > 1,
+                        rx.table.cell(
+                            rx.cond(
+                                bid.contains(BidState.actual_round),
+                                rx.hstack(
+                                    rx.dialog.root(
+                                        rx.dialog.trigger(rx.button("Ändern", width="70px")),
+                                        bid_dialog(bid["name"], False),
+                                        on_open_change=BidState.reset_bid_validation,
                                     ),
-                                    width="80px",
+                                    rx.icon("circle-check-big", color="green", size=24),
+                                ),
+                                rx.hstack(
+                                    rx.dialog.root(
+                                        rx.dialog.trigger(rx.button("Bieten", width="70px")),
+                                        bid_dialog(bid["name"], True),
+                                        on_open_change=BidState.reset_bid_validation,
+                                    ),
+                                    rx.icon("circle", color="gray", size=24),
                                 )
                             ),
-                            bid_dialog(bid["name"]),
-                        )
+                        ),
+                    ),
+                    width="100%",
+                    vertical_align="middle"
+                ),
+            ),
+            rx.table.row(
+                rx.table.cell(
+                    rx.cond(
+                        ~BidState.show_add_input,
+                        rx.icon("plus", size=24, on_click=BidState.show_add),
+                        rx.hstack(
+                            rx.input(
+                                placeholder="Name eingeben",
+                                value=BidState.neuer_name,
+                                on_change=BidState.set_neuer_name,
+                                auto_focus=True,
+                            ),
+                            rx.icon("check", on_click=BidState.add_name, color="green"),
+                            rx.icon("x", on_click=BidState.cancel_add, color="red"),
+                        ),
                     )
-                )
-            )
+                ),
+                rx.foreach(
+                    BidState.rounds,
+                    lambda r: rx.table.column_header_cell("")
+                ),
+                rx.cond(
+                    BidState.bids.length() > 1,
+                    rx.table.column_header_cell("")
+                ),
+            ),
+
+            rx.table.row(
+                rx.table.column_header_cell(
+                    "Summe:",
+                    vertical_align="middle"
+                ),
+                rx.foreach(
+                    BidState.sums,
+                    lambda r: rx.table.column_header_cell(f"{r}", vertical_align="middle")
+                ),
+                rx.cond(
+                    BidState.bids.length() > 1,
+                    rx.table.column_header_cell("")
+                ),
+                bg="var(--gray-a2)",
+            ),
         ),
         on_mount=BidState.load_bids,
         variant="surface",
         size="3",
-        width="100%"
+        width="100%",
+
     )

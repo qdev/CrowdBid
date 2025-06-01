@@ -10,7 +10,6 @@ from datetime import datetime
 class ListAuctionState(rx.State):
     auctions: list[Auction] = []
     current_auction: Auction = Auction()
-    edit_url: str = "EDIT"
 
     def load_entries(self) -> list[Auction]:
         with rx.session() as session:
@@ -33,7 +32,6 @@ def list_auction_ui():
     return rx.vstack(
         header(),
         auktion_table(),
-        rx.button(ListAuctionState.edit_url, on_click=rx.set_clipboard(ListAuctionState.edit_url)),
         on_mount=ListAuctionState.load_entries,
         width="100%",
         padding="0.7rem"
