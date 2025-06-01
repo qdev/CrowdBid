@@ -6,7 +6,6 @@ from CrowdBid.bid import bid_ui
 from CrowdBid.bid_data import data_bid_ui
 import asyncio
 import websockets
-from CrowdBid.test import namenliste
 
 
 clients = set()
@@ -45,7 +44,6 @@ app = rx.App()
 app.register_lifespan_task(deploy_ws)
 app.add_page(create_auction_ui, route="/")
 app.add_page(list_auction_ui, route="/list")
-app.add_page(namenliste, route="/test")
 app.add_page(edit_page_ui)
 app.add_page(data_bid_ui)
 app.add_page(bid_ui)

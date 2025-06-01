@@ -71,7 +71,7 @@ class CreateAuctionState(rx.State):
 
 
 ### FRONTEND ###
-@rx.page(route="/")
+
 def create_auction_ui():
     """Formular zum Erstellen einer Auktion."""
     return rx.vstack(
