@@ -35,7 +35,8 @@ class BidState(rx.State):
     async def ws_listener(self):
         while True:
             try:
-                async with websockets.connect("ws://localhost:28765") as ws:
+                async with websockets.connect(f"wss://{self.router.page.host}/_event/?EIO=4&transport=websocket") as ws:
+                #async with websockets.connect(f"wss://{self.router.page.host}:28765") as ws:
                     async for message in ws:
                         async with self:
                             self.load_bids()
@@ -257,6 +258,7 @@ def bid_ui():
 def bid_dialog(name: str, add: bool):
     return rx.dialog.content(
         rx.dialog.title("Gebot eingeben"),
+        rx.dialog.description("Formular zum Eingeben eines neuen Gebots"),
         rx.form(
             rx.flex(
                 rx.el.input(

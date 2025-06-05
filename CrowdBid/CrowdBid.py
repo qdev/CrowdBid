@@ -1,14 +1,19 @@
+from datetime import datetime
+
 import reflex as rx
+from fastapi import FastAPI
+
 from CrowdBid.auction_create import create_auction_ui
 from CrowdBid.auction_edit import edit_page_ui
 from CrowdBid.auction_list import list_auction_ui
 from CrowdBid.bid import bid_ui
 from CrowdBid.bid_data import data_bid_ui
-import asyncio
+from sqlmodel import select
 import websockets
-
+from CrowdBid.models import Auction, Bid
 
 clients = set()
+
 
 async def ws_handler(websocket):
     clients.add(websocket)
@@ -24,9 +29,16 @@ async def ws_handler(websocket):
     finally:
         clients.remove(websocket)
 
+
 async def deploy_ws():
-    async with websockets.serve(ws_handler, "localhost", 28765):
-        await asyncio.Future()  # run forever
+    server = await websockets.serve(
+        ws_handler,
+        "127.0.0.1",  # Nur lokale Verbindungen
+        28765,  # Port für WebSocket
+        ping_interval=None,  # Deaktiviert automatische Pings
+        ping_timeout=None  # Deaktiviert Ping-Timeouts
+    )
+    await server.wait_closed()
 
 
 @rx.page(route="/404")
@@ -38,9 +50,25 @@ def not_found():
         padding="2em",
         spacing="4",
     )
-
-# App-Konfiguration
 app = rx.App()
+
+@app.api.get("/maintenance")
+def maintenance():
+    """Entfernt abgelaufene Auktionen und deren Gebote."""
+    current_time = datetime.now()
+    with rx.session() as session:  # Synchrone Session
+        expired_auctions = session.exec(
+            select(Auction).where(Auction.expiration < current_time)
+        ).all()
+        for auction in expired_auctions:
+            bids = session.exec(select(Bid).where(Bid.ida == auction.id)).all()
+            for bid in bids:
+                session.delete(bid)
+            session.delete(auction)
+        session.commit()
+    return {"status": "OK", "cleaned_auctions": len(expired_auctions)}
+
+
 app.register_lifespan_task(deploy_ws)
 app.add_page(create_auction_ui, route="/")
 app.add_page(list_auction_ui, route="/list")
