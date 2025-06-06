@@ -50,9 +50,10 @@ def not_found():
         padding="2em",
         spacing="4",
     )
-app = rx.App()
 
-@app.api.get("/maintenance")
+
+api = FastAPI()
+@api.get("/maintenance")
 def maintenance():
     """Entfernt abgelaufene Auktionen und deren Gebote."""
     current_time = datetime.now()
@@ -69,6 +70,7 @@ def maintenance():
     return {"status": "OK", "cleaned_auctions": len(expired_auctions)}
 
 
+app = rx.App(api_transformer=api)
 app.register_lifespan_task(deploy_ws)
 app.add_page(create_auction_ui, route="/")
 app.add_page(list_auction_ui, route="/list")

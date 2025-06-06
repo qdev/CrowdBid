@@ -2,3 +2,6 @@ reflex
 SQLAlchemy
 websockets
 jeepney
+alembic
+sqlmodel
+fastapi

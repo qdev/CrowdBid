@@ -1,11 +1,11 @@
 import asyncio
-from datetime import datetime
 import reflex as rx
-import sqlalchemy
 import websockets
-from sqlmodel import select, update
+from sqlmodel import select
 from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
+from sqlalchemy import update
+from datetime import datetime
 
 
 ### BACKEND ###
@@ -14,11 +14,9 @@ class BidState(rx.State):
     bids: list[dict] = []
     actual_round: int = 1
     status: str = ""
-    auction: Auction = None
+    auction: Auction | None = None
     rounds: list[int] = []
     sums: list[float] = []
-    # round_keys: list[str] = []
-    error: str = ""
     hidden: bool = True
     missing: int
     neuer_name: str = ""
@@ -65,59 +63,30 @@ class BidState(rx.State):
         return f"round{self.actual_round}" if self.actual_round > 0 else ""
 
     @rx.event
-    def add_bidder(self, name: str):
-        with rx.session() as session:
-            session.add(Bid(name=name, round=0, bid=0, ida=self.auction.id, time=datetime.now()))
-            session.commit()
-            self.load_bids()
-        return BidState.send_ws()
-
-    @rx.event
     def handle_bid(self, form_data: dict):
         self.is_valid_bid = False
         try:
-            if "bid" not in form_data or not form_data["bid"]:
-                self.error = "Bitte geben Sie ein Gebot ein"
-                return
-
-            bid_value = float(form_data["bid"])
-            if bid_value <= 0:
-                self.error = "Das Gebot muss größer als 0 sein"
-                return
-
             with rx.session() as session:
-                session.execute(
-                    sqlalchemy.text(
-                        "INSERT INTO bid (name, round, bid, ida, time) "
-                        "VALUES (:name, :round, :bid, :ida, datetime('now')) "
-                        "ON CONFLICT (name, round, ida) DO UPDATE "
-                        "SET bid = :bid"
-                    ),
-                    {
-                        "name": form_data["name"],
-                        "round": self.actual_round,
-                        "bid": bid_value,
-                        "ida": self.auction.id
-                    }
-                )
+                session.merge(Bid(name=form_data["name"], round=self.actual_round, bid=float(form_data["bid"]), ida=self.auction.id, time=datetime.now()))
                 session.commit()
-
-            self.error = ""
             return BidState.send_ws()
-
-        except ValueError:
-            self.error = "Bitte geben Sie eine gültige Zahl ein"
         except Exception as e:
-            self.error = f"Ein Fehler ist aufgetreten: {str(e)}"
+            print(f"Error: {str(e)}")
             self.load_bids()
+            return None
 
     @rx.event
     def load_bids(self):
-        with (rx.session() as session):
+        with rx.session() as session:
+            # First, try to get the auction
             self.auction = session.exec(select(Auction).where(Auction.token == self.auction_token)).first()
+            
+            # If no auction is found, redirect to 404 and return early
             if self.auction is None:
+                self.error = "Auction not found"
                 return rx.redirect("/404")
 
+            # Rest of the method remains the same
             all_bids = session.exec(select(Bid).where(Bid.ida == self.auction.id)).all()
 
             bid_dict = {}
@@ -145,24 +114,25 @@ class BidState(rx.State):
                 else:
                     self.status = f"Es waren {self.auction.target_bid} € aufzubringen. Es sind zusätzlich {s - self.auction.target_bid} € geboten worden"
             self.rounds = list(range(1, self.actual_round))
-            self.sums = [float(bid_sum.get(i, 0)) if bid_sum.get(i, 0).is_integer() else bid_sum.get(i, 0) for i in
-                         range(1, self.actual_round)]
-            # self.round_keys = [f"round{i}" for i in range(1, self.actual_round)]
+            self.sums = [float(bid_sum.get(i, 0)) if bid_sum.get(i, 0).is_integer() else bid_sum.get(i, 0) for i in range(1, self.actual_round)]
 
     @rx.event
     def rename_bidder(self, name_alt: str, name_neu: str):
         with rx.session() as session:
             if not session.exec(select(Bid).where((Bid.ida == self.auction.id) & (Bid.name == name_neu))).first():
-                session.exec(update(Bid).where((Bid.ida == self.auction.id) & (
-                        Bid.name == name_alt)).values(name=name_neu))
+                session.exec(update(Bid).where((Bid.ida == self.auction.id) & (Bid.name == name_alt)).values(name=name_neu))
                 session.commit()
 
     @rx.event
     def add_name(self):
         if self.neuer_name.strip():
-            self.add_bidder(self.neuer_name.strip())
+            with rx.session() as session:
+                session.add(Bid(name=self.neuer_name.strip(), round=0, bid=0, ida=self.auction.id, time=datetime.now()))
+                session.commit()
             self.neuer_name = ""
             self.show_add_input = False
+            return BidState.send_ws()
+        return None
 
     @rx.event
     def show_add(self):
@@ -194,7 +164,8 @@ class BidState(rx.State):
             self.editing_name = ""
             self.editing_value_name = ""
             self.hovered_name = ""
-            self.load_bids()
+            return BidState.send_ws()
+        return None
 
     @rx.event
     def validate_bid(self, value: str):
