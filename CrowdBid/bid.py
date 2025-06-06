@@ -35,8 +35,7 @@ class BidState(rx.State):
     async def ws_listener(self):
         while True:
             try:
-                async with websockets.connect(f"wss://{self.router.page.host}/_event/?EIO=4&transport=websocket") as ws:
-                #async with websockets.connect(f"wss://{self.router.page.host}:28765") as ws:
+                async with websockets.connect("ws://localhost:28765") as ws:
                     async for message in ws:
                         async with self:
                             self.load_bids()
@@ -71,6 +70,7 @@ class BidState(rx.State):
             session.add(Bid(name=name, round=0, bid=0, ida=self.auction.id, time=datetime.now()))
             session.commit()
             self.load_bids()
+        return BidState.send_ws()
 
     @rx.event
     def handle_bid(self, form_data: dict):
