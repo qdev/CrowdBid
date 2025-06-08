@@ -80,10 +80,9 @@ class BidState(rx.State):
         with rx.session() as session:
             # First, try to get the auction
             self.auction = session.exec(select(Auction).where(Auction.token == self.auction_token)).first()
-            
+
             # If no auction is found, redirect to 404 and return early
             if self.auction is None:
-                self.error = "Auction not found"
                 return rx.redirect("/404")
 
             # Rest of the method remains the same
@@ -328,116 +327,156 @@ def bidder(name):
 
 
 def bid_table():
-    return rx.table.root(
-        rx.table.header(
-            rx.table.row(
-                rx.table.column_header_cell(
-                    "Runde:",
-                ),
-
-                rx.foreach(
-                    BidState.rounds,
-                    lambda r: rx.table.column_header_cell(f"R{r}", vertical_align="middle")
-                ),
-                rx.cond(
-                    BidState.bids.length() > 1,
+    return rx.box(
+        rx.table.root(
+            rx.table.header(
+                rx.table.row(
                     rx.table.column_header_cell(
-                        f"R{BidState.actual_round}",
-                    ),
-                ),
-            )
-        ),
-        rx.table.body(
-            rx.foreach(
-                BidState.bids,
-                lambda bid: rx.table.row(
-                    rx.table.cell(
-                        bidder(bid["name"]),
-                        vertical_align="middle"
+                        "Runde:",
+                        style={
+                            "position": "sticky",
+                            "left": "0",
+                            "background": "var(--gray-2)",
+                            "z_index": "1"
+                        }
                     ),
                     rx.foreach(
                         BidState.rounds,
-                        lambda r: rx.table.cell(rx.cond(
-                            BidState.hidden,
-                            rx.icon("eye-off", color="gray", size=16),
-                            rx.text(bid.get(r, "-"))),
-                            vertical_align="middle"
-                        )
+                        #lambda r: rx.table.column_header_cell(f"\u00A0{r}\u00A0", vertical_align="middle", style={"white_space": "nowrap", "text_decoration": "underline", "text_decoration_thickness": "2px","text_underline_offset": "4px"})
+                        lambda r: rx.table.column_header_cell(f"R{r}", vertical_align="middle")
                     ),
                     rx.cond(
                         BidState.bids.length() > 1,
-                        rx.table.cell(
-                            rx.cond(
-                                bid.contains(BidState.actual_round),
-                                rx.hstack(
-                                    rx.dialog.root(
-                                        rx.dialog.trigger(rx.button("Ändern", width="70px")),
-                                        bid_dialog(bid["name"], False),
-                                        on_open_change=BidState.reset_bid_validation,
-                                    ),
-                                    rx.icon("circle-check-big", color="green", size=24),
-                                ),
-                                rx.hstack(
-                                    rx.dialog.root(
-                                        rx.dialog.trigger(rx.button("Bieten", width="70px")),
-                                        bid_dialog(bid["name"], True),
-                                        on_open_change=BidState.reset_bid_validation,
-                                    ),
-                                    rx.icon("circle", color="gray", size=24),
-                                )
-                            ),
+                        rx.table.column_header_cell(
+                            f"R{BidState.actual_round}",
                         ),
                     ),
-                    width="100%",
-                    vertical_align="middle"
-                ),
+                )
             ),
-            rx.table.row(
-                rx.table.cell(
-                    rx.cond(
-                        ~BidState.show_add_input,
-                        rx.icon("plus", size=24, on_click=BidState.show_add),
-                        rx.hstack(
-                            rx.input(
-                                placeholder="Name eingeben",
-                                value=BidState.neuer_name,
-                                on_change=BidState.set_neuer_name,
-                                auto_focus=True,
-                            ),
-                            rx.icon("check", on_click=BidState.add_name, color="green"),
-                            rx.icon("x", on_click=BidState.cancel_add, color="red"),
+            rx.table.body(
+                rx.foreach(
+                    BidState.bids,
+                    lambda bid: rx.table.row(
+                        rx.table.cell(
+                            bidder(bid["name"]),
+                            vertical_align="middle",
+                            style={
+                                "position": "sticky",
+                                "left": "0",
+                                "background": "var(--gray-2)",
+                                "z_index": "1"
+                            }
                         ),
-                    )
+                        rx.foreach(
+                            BidState.rounds,
+                            lambda r: rx.table.cell(rx.cond(
+                                BidState.hidden,
+                                rx.icon("eye-off", color="gray", size=16),
+                                rx.text(bid.get(r, "-"))),
+                                vertical_align="middle"
+                            )
+                        ),
+                        rx.cond(
+                            BidState.bids.length() > 1,
+                            rx.table.cell(
+                                rx.cond(
+                                    bid.contains(BidState.actual_round),
+                                    rx.hstack(
+                                        rx.dialog.root(
+                                            rx.dialog.trigger(rx.button("Ändern", width="70px")),
+                                            bid_dialog(bid["name"], False),
+                                            on_open_change=BidState.reset_bid_validation,
+                                        ),
+                                        rx.icon("circle-check-big", color="green", size=24),
+                                    ),
+                                    rx.hstack(
+                                        rx.dialog.root(
+                                            rx.dialog.trigger(rx.button("Bieten", width="70px")),
+                                            bid_dialog(bid["name"], True),
+                                            on_open_change=BidState.reset_bid_validation,
+                                        ),
+                                        rx.icon("circle", color="gray", size=24),
+                                    )
+                                ),
+                            ),
+                        ),
+                        width="100%",
+                        vertical_align="middle"
+                    ),
                 ),
-                rx.foreach(
-                    BidState.rounds,
-                    lambda r: rx.table.column_header_cell("")
+                rx.table.row(
+                    rx.table.cell(
+                        rx.cond(
+                            ~BidState.show_add_input,
+                            rx.icon("plus", size=24, on_click=BidState.show_add),
+                            rx.hstack(
+                                rx.input(
+                                    placeholder="Name eingeben",
+                                    value=BidState.neuer_name,
+                                    on_change=BidState.set_neuer_name,
+                                    auto_focus=True,
+                                ),
+                                rx.icon("check", on_click=BidState.add_name, color="green"),
+                                rx.icon("x", on_click=BidState.cancel_add, color="red"),
+                            ),
+                        ),
+                        style={
+                            "position": "sticky",
+                            "left": "0",
+                            "background": "var(--gray-2)",
+                            "z_index": "1"
+                        }
+                    ),
+                    rx.foreach(
+                        BidState.rounds,
+                        lambda r: rx.table.column_header_cell("")
+                    ),
+                    rx.cond(
+                        BidState.bids.length() > 1,
+                        rx.table.column_header_cell("")
+                    ),
                 ),
-                rx.cond(
-                    BidState.bids.length() > 1,
-                    rx.table.column_header_cell("")
-                ),
-            ),
 
-            rx.table.row(
-                rx.table.column_header_cell(
-                    "Summe:",
-                    vertical_align="middle"
+                rx.table.row(
+                    rx.table.column_header_cell(
+                        "Summe:",
+                        vertical_align="middle",
+                        style={
+                            "position": "sticky",
+                            "left": "0",
+                            "background": "var(--gray-2)",
+                            "z_index": "1"
+                        }
+                    ),
+                    rx.foreach(
+                        BidState.sums,
+                        lambda r: rx.table.column_header_cell(f"{r}", vertical_align="middle")
+                    ),
+                    rx.cond(
+                        BidState.bids.length() > 1,
+                        rx.table.column_header_cell("")
+                    ),
+                    bg="var(--gray-a2)",
                 ),
-                rx.foreach(
-                    BidState.sums,
-                    lambda r: rx.table.column_header_cell(f"{r}", vertical_align="middle")
-                ),
-                rx.cond(
-                    BidState.bids.length() > 1,
-                    rx.table.column_header_cell("")
-                ),
-                bg="var(--gray-a2)",
             ),
+            variant="surface",
+            size="3",
+            width="100%",
+            id="bid-table",
         ),
-        on_mount=BidState.load_bids,
-        variant="surface",
-        size="3",
+        on_mount=lambda: [
+            BidState.load_bids(),
+            rx.call_script("""
+                setTimeout(() => {
+                    const table = document.getElementById('bid-table');
+                    if (table) {
+                        const viewport = table.querySelector('[data-radix-scroll-area-viewport]');
+                        if (viewport) {
+                            viewport.scrollLeft = viewport.scrollWidth;
+                        }
+                    }
+                }, 100);
+            """)
+        ],
         width="100%",
-
     )
