@@ -13,6 +13,7 @@ class Auction(rx.Model, table=True):
     topic: str = sqlmodel.Field(default=None)
     description: str = sqlmodel.Field(default=None)
     round_end_mode: str = sqlmodel.Field(default="auto")
+    peek: bool = sqlmodel.Field(default=True)
     target_bid: float = sqlmodel.Field(default=None)
     last_round: int = sqlmodel.Field(default=-1)
 

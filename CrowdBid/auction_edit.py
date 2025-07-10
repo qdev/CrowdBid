@@ -20,7 +20,8 @@ class EditAuctionState(rx.State):
     is_form_valid: bool = False
     topic: str = ""
     target_bid: str = ""
-    round_end_mode: str = "auto"  # Variable für den Rundende-Modus als int
+    round_end_mode: str = "auto"
+    peek: bool = True  # Neue State-Variable
 
     @rx.event
     def validate_form(self):
@@ -46,6 +47,12 @@ class EditAuctionState(rx.State):
         self.round_end_mode = value
         self.validate_form()
 
+    @rx.event
+    def handle_peek_change(self, value: bool):
+        """Behandelt Änderungen an der Peek-Option."""
+        self.peek = value
+        self.validate_form()
+
     @rx.var
     def current_auction_token(self) -> str:
         return self.router.page.params.get("token", "")
@@ -61,8 +68,8 @@ class EditAuctionState(rx.State):
                 # Initialisiere die Formularfelder mit den aktuellen Werten
                 self.topic = self.auction.topic
                 self.target_bid = str(self.auction.target_bid)
-                # Lade den round_end_mode aus der Datenbank
                 self.round_end_mode = self.auction.round_end_mode or "auto"
+                self.peek = self.auction.peek or True  # Lade peek-Wert
                 # self.validate_form()
             else:
                 return rx.redirect("/")
@@ -76,8 +83,8 @@ class EditAuctionState(rx.State):
             auction.target_bid = float(form_data.get("target_bid", auction.target_bid))
             auction.expiration = datetime.strptime(form_data.get("expiration", auction.expiration.strftime("%Y-%m-%d")), "%Y-%m-%d")
             auction.update_at = datetime.now()
-            # Speichere den round_end_mode als int in der Datenbank
             auction.round_end_mode = self.round_end_mode
+            auction.peek = self.peek  # Speichere peek-Wert
             session.add(auction)
             session.commit()
             self.is_form_valid = False
@@ -268,6 +275,22 @@ def edit_page_ui():
                                 on_change=EditAuctionState.handle_round_end_mode_change,
                                 direction="column",
                                 spacing="3",
+                                size="3"
+                            ),
+                            align_items="start",
+                            width="100%"
+                        ),
+                        direction="column",
+                        width="100%"
+                    ),
+                    rx.flex(
+                        rx.vstack(
+                            rx.text.strong("Optionen"),
+                            rx.checkbox(
+                                "Gebote während der Runde sichtbar (Peek)",
+                                checked=EditAuctionState.peek,
+                                on_change=EditAuctionState.handle_peek_change,
+                                name="peek",
                                 size="3"
                             ),
                             align_items="start",

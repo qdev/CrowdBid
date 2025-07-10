@@ -1,7 +1,7 @@
 import reflex as rx
 
 
-def header(bs=None):
+def header(bs=None,peek=False):
     return (
         rx.vstack(
             rx.flex(
@@ -19,9 +19,10 @@ def header(bs=None):
                 ),
                 rx.spacer(),
                 rx.hstack(
+                    rx.cond(peek,
                     rx.cond(bs and bs.hidden,
                             rx.icon("eye", on_click=bs.toggle_hidden if bs else None),
-                            rx.icon("eye-off", on_click=bs.toggle_hidden if bs else None)) if bs else rx.text(""),
+                            rx.icon("eye-off", on_click=bs.toggle_hidden if bs else None)) if bs else rx.text("")),
                     rx.color_mode.button(),
                     spacing="3",
                     align_items="center",

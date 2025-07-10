@@ -191,7 +191,7 @@ class BidState(rx.State):
 @rx.page(route="/[token]/bid", on_load=BidState.ws_listener)
 def bid_ui():
     return rx.vstack(
-        header(BidState),
+        header(BidState,BidState.auction.peek),
         rx.card(
             rx.vstack(
                 rx.heading(BidState.auction.topic, size="6"),
