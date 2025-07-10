@@ -12,7 +12,9 @@ class Auction(rx.Model, table=True):
     expiration: datetime = sqlmodel.Field(default=None)
     topic: str = sqlmodel.Field(default=None)
     description: str = sqlmodel.Field(default=None)
+    round_end_mode: str = sqlmodel.Field(default="auto")
     target_bid: float = sqlmodel.Field(default=None)
+    last_round: int = sqlmodel.Field(default=-1)
 
 
 class Bid(rx.Model, table=True):

@@ -6,23 +6,25 @@ from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
 from sqlalchemy import update
 from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 
 ### BACKEND ###
 
+# Aktuell gemischt Deutsch/Englisch
 class BidState(rx.State):
-    bids: list[dict] = []
+    new_name: str = ""  # Deutsch
+    bids: List[Dict[str, Any]] = []
     actual_round: int = 1
     status: str = ""
-    auction: Auction | None = None
-    rounds: list[int] = []
-    sums: list[float] = []
+    auction: Optional[Auction] = None
+    rounds: List[int] = []
+    sums: List[float] = []
     hidden: bool = True
     missing: int
-    neuer_name: str = ""
+    editing_name: str = ""  # Englisch
     show_add_input: bool = False
     hovered_name: str = ""
-    editing_name: str = ""
     editing_value_name: str = ""
     is_valid_bid: bool = False
 
@@ -52,6 +54,13 @@ class BidState(rx.State):
     def toggle_hidden(self):
         self.hidden = not self.hidden
         self.status += "."
+        return BidState.send_ws()
+
+    @rx.event
+    def end_round(self):
+        with rx.session() as session:
+            session.exec(update(Auction).where(Auction.id == self.auction.id).values(last_round=self.actual_round + 1))
+            session.commit()
         return BidState.send_ws()
 
     @rx.var
@@ -99,8 +108,8 @@ class BidState(rx.State):
 
             self.bids = [{"name": k} | v for k, v in bid_dict.items()]
             self.actual_round = len(bid_sum) - 1
-            self.missing = sum([0 if len(bid_sum) - 1 in x else 1 for x in self.bids])
-            if self.missing == 0:
+            self.missing = sum([0 if self.actual_round in x else 1 for x in self.bids])
+            if (self.missing == 0 and self.auction.round_end_mode == "auto") or self.auction.last_round > self.actual_round:
                 self.actual_round += 1
                 self.missing = len(self.bids)
 
@@ -124,11 +133,11 @@ class BidState(rx.State):
 
     @rx.event
     def add_name(self):
-        if self.neuer_name.strip():
+        if self.new_name.strip():
             with rx.session() as session:
-                session.add(Bid(name=self.neuer_name.strip(), round=0, bid=0, ida=self.auction.id, time=datetime.now()))
+                session.add(Bid(name=self.new_name.strip(), round=0, bid=0, ida=self.auction.id, time=datetime.now()))
                 session.commit()
-            self.neuer_name = ""
+            self.new_name = ""
             self.show_add_input = False
             return BidState.send_ws()
         return None
@@ -137,12 +146,12 @@ class BidState(rx.State):
     def show_add(self):
         self.cancel_edit_name()
         self.show_add_input = True
-        self.neuer_name = ""
+        self.new_name = ""
 
     @rx.event
     def cancel_add(self):
         self.show_add_input = False
-        self.neuer_name = ""
+        self.new_name = ""
 
     @rx.event
     def start_edit_name(self, name: str):
@@ -233,7 +242,7 @@ def bid_dialog(name: str, add: bool):
             rx.flex(
                 rx.el.input(
                     name="name",
-                    hidden=True,
+                    type="hidden",
                     value=name,
                 ),
                 rx.vstack(
@@ -247,7 +256,7 @@ def bid_dialog(name: str, add: bool):
                         size="3",
                         on_change=BidState.validate_bid,
                     ),
-                    rx.cond(add and BidState.missing == 1,
+                    rx.cond(add & (BidState.auction.round_end_mode == "auto") & (BidState.missing == 1),
                             rx.text("Achtung! Dieses Gebot schließt die Runde ab. Ein Ändern ist dan nicht mehr möglich.", color="red")),
                     align_items="start",
                 ),
@@ -342,7 +351,7 @@ def bid_table():
                     ),
                     rx.foreach(
                         BidState.rounds,
-                        #lambda r: rx.table.column_header_cell(f"\u00A0{r}\u00A0", vertical_align="middle", style={"white_space": "nowrap", "text_decoration": "underline", "text_decoration_thickness": "2px","text_underline_offset": "4px"})
+                        # lambda r: rx.table.column_header_cell(f"\u00A0{r}\u00A0", vertical_align="middle", style={"white_space": "nowrap", "text_decoration": "underline", "text_decoration_thickness": "2px","text_underline_offset": "4px"})
                         lambda r: rx.table.column_header_cell(f"R{r}", vertical_align="middle")
                     ),
                     rx.cond(
@@ -412,8 +421,8 @@ def bid_table():
                             rx.hstack(
                                 rx.input(
                                     placeholder="Name eingeben",
-                                    value=BidState.neuer_name,
-                                    on_change=BidState.set_neuer_name,
+                                    value=BidState.new_name,
+                                    on_change=BidState.set_new_name,
                                     auto_focus=True,
                                 ),
                                 rx.icon("check", on_click=BidState.add_name, color="green"),
@@ -454,7 +463,87 @@ def bid_table():
                     ),
                     rx.cond(
                         BidState.bids.length() > 1,
-                        rx.table.column_header_cell("")
+                        rx.table.column_header_cell(
+                            # Bei "auto" - zeige die Info-Box
+                            rx.cond(
+                                BidState.auction.round_end_mode == "auto",
+                                rx.box(
+                                    rx.text(
+                                        "Runde endet automatisch mit letztem Gebot",
+                                        size="1",
+                                        style={
+                                            "line_height": "1.2",
+                                            "text_align": "center",
+                                            "white_space": "pre-line"
+                                        }
+                                    ),
+                                    padding="2",
+                                    border_radius="8px",
+                                    background="var(--gray-a3)",
+                                    border="1px solid var(--gray-a6)",
+                                    width="110px"
+                                ),
+                                # Bei "manual_last" - zeige Button oder Info
+                                rx.cond(
+                                    BidState.auction.round_end_mode == "manual_last",
+                                    rx.cond(
+                                        BidState.missing == 0,
+                                        rx.button(
+                                            "Runde beenden",
+                                            on_click=BidState.end_round,
+                                            size="1",
+                                            color_scheme="blue",
+                                            variant="solid",
+                                            width="110px"
+                                        ),
+                                        rx.box(
+                                            rx.text(
+                                                "Es fehlen noch Gebote",
+                                                size="1",
+                                                style={
+                                                    "line_height": "1.2",
+                                                    "text_align": "center",
+                                                    "white_space": "pre-line"
+                                                }
+                                            ),
+                                            padding="2",
+                                            border_radius="8px",
+                                            background="var(--gray-a3)",
+                                            border="1px solid var(--gray-a6)",
+                                            width="110px"
+                                        )
+                                    ),
+                                    # Bei "manual_first" - zeige immer Button
+                                    rx.cond(
+                                        BidState.bids.length() - BidState.missing > 0,
+                                        rx.button(
+                                            "Runde beenden",
+                                            on_click=BidState.end_round,
+                                            size="1",
+                                            color_scheme="blue",
+                                            variant="solid",
+                                            width="110px"
+                                        ),
+                                        rx.box(
+                                            rx.text(
+                                                "Es fehlen noch Gebote",
+                                                size="1",
+                                                style={
+                                                    "line_height": "1.2",
+                                                    "text_align": "center",
+                                                    "white_space": "pre-line"
+                                                }
+                                            ),
+                                            padding="2",
+                                            border_radius="8px",
+                                            background="var(--gray-a3)",
+                                            border="1px solid var(--gray-a6)",
+                                            width="110px"
+                                        )
+                                    ),
+                                )
+                            )
+                        )
                     ),
                     bg="var(--gray-a2)",
                 ),
