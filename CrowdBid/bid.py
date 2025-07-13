@@ -1,4 +1,6 @@
 import asyncio
+import math
+
 import reflex as rx
 import websockets
 from sqlmodel import select
@@ -38,15 +40,19 @@ class BidState(rx.State):
                 async with websockets.connect("ws://localhost:28765") as ws:
                     async for message in ws:
                         async with self:
-                            self.load_bids()
+                            msg = message.split("#")
+                            if msg[0] == f"A{self.auction.id}":
+                                self.load_bids()
+                                if msg[1]:
+                                    yield rx.toast.info(msg[1])
             except Exception:
                 await asyncio.sleep(2)
 
     @rx.event(background=True)
-    async def send_ws(self):
+    async def send_ws(self, msg: str = ""):
         try:
             async with websockets.connect("ws://localhost:28765") as ws:
-                await ws.send("notify")
+                await ws.send(f"A{self.auction.id}#{msg}")
         except Exception:
             pass
 
@@ -61,7 +67,7 @@ class BidState(rx.State):
         with rx.session() as session:
             session.exec(update(Auction).where(Auction.id == self.auction.id).values(last_round=self.actual_round + 1))
             session.commit()
-        return BidState.send_ws()
+        return BidState.send_ws(f"Die Runde {self.actual_round} wurde beendet.")
 
     @rx.var
     def auction_token(self) -> str:
@@ -78,7 +84,7 @@ class BidState(rx.State):
             with rx.session() as session:
                 session.merge(Bid(name=form_data["name"], round=self.actual_round, bid=float(form_data["bid"]), ida=self.auction.id, time=datetime.now()))
                 session.commit()
-            return BidState.send_ws()
+            return BidState.send_ws(f"{form_data["name"]} hat ein Gebot abgegeben.")
         except Exception as e:
             print(f"Error: {str(e)}")
             self.load_bids()
@@ -98,20 +104,35 @@ class BidState(rx.State):
             all_bids = session.exec(select(Bid).where(Bid.ida == self.auction.id)).all()
 
             bid_dict = {}
-            bid_sum = {}
+            ar = 0
 
             for bid in all_bids:
                 if bid.name not in bid_dict:
                     bid_dict[bid.name] = {}
                 bid_dict[bid.name][bid.round] = bid.bid
-                bid_sum[bid.round] = bid_sum.get(bid.round, 0) + bid.bid
+                ar = max(ar, bid.round)
 
-            self.bids = [{"name": k} | v for k, v in bid_dict.items()]
-            self.actual_round = len(bid_sum) - 1
-            self.missing = sum([0 if self.actual_round in x else 1 for x in self.bids])
-            if (self.missing == 0 and self.auction.round_end_mode == "auto") or self.auction.last_round > self.actual_round:
-                self.actual_round += 1
+            self.bids = []
+            bid_sum = {}
+            for name, values in bid_dict.items():
+                tb = {'name': name}
+                tv = float("nan")
+                for r in range(1, ar + 1):
+                    if r in values:
+                        tv = values.get(r)
+                        tb[r] = tv
+                    elif r < max(ar, self.auction.last_round) and not math.isnan(tv):
+                        tb[r] = - tv
+                    if not math.isnan(tv):
+                        bid_sum[r] = bid_sum.get(r, 0) + tv
+                self.bids.append(tb)
+
+            self.missing = sum([0 if ar in x else 1 for x in self.bids])
+            if ar == 0 or (self.missing == 0 and self.auction.round_end_mode == "auto") or self.auction.last_round > ar:
+                self.actual_round = ar + 1
                 self.missing = len(self.bids)
+            else:
+                self.actual_round = ar
 
             if self.actual_round < 2:
                 self.status = f"Es sind {self.auction.target_bid} € aufzubringen. Durch Klicken auf das \uFF0B können neue Bietende hinzugefügt werden."
@@ -139,7 +160,7 @@ class BidState(rx.State):
                 session.commit()
             self.new_name = ""
             self.show_add_input = False
-            return BidState.send_ws()
+            return BidState.send_ws(f"Neuer Bietende: {self.new_name.strip()}")
         return None
 
     @rx.event
@@ -168,11 +189,13 @@ class BidState(rx.State):
     @rx.event
     def confirm_edit_name(self):
         if self.editing_value_name.strip():
-            self.rename_bidder(self.editing_name, self.editing_value_name)
+            newn = self.editing_value_name
+            oldn = self.editing_name
+            self.rename_bidder(oldn, newn)
             self.editing_name = ""
             self.editing_value_name = ""
             self.hovered_name = ""
-            return BidState.send_ws()
+            return BidState.send_ws(f"{oldn} hat sich in {newn} umbenannt.")
         return None
 
     @rx.event
@@ -191,7 +214,7 @@ class BidState(rx.State):
 @rx.page(route="/[token]/bid", on_load=BidState.ws_listener)
 def bid_ui():
     return rx.vstack(
-        header(BidState,BidState.auction.peek),
+        header(BidState, BidState.auction.peek),
         rx.card(
             rx.vstack(
                 rx.heading(BidState.auction.topic, size="6"),
@@ -376,12 +399,19 @@ def bid_table():
                                 "z_index": "1"
                             }
                         ),
+
                         rx.foreach(
                             BidState.rounds,
-                            lambda r: rx.table.cell(rx.cond(
-                                BidState.hidden,
-                                rx.icon("eye-off", color="gray", size=16),
-                                rx.text(bid.get(r, "-"))),
+                            lambda r: rx.table.cell(
+                                rx.cond(
+                                    BidState.hidden,
+                                    rx.icon("eye-off", color="gray", size=16),
+                                    rx.cond(
+                                        rx.Var(f"{bid[r]} <= 0", _var_type=bool),
+                                        rx.text.em(rx.Var(f"-{bid[r]}", _var_type=float), color="grey"),
+                                        rx.text(bid.get(r, "-"))
+                                    ),
+                                ),
                                 vertical_align="middle"
                             )
                         ),

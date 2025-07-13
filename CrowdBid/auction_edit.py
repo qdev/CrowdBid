@@ -2,9 +2,11 @@ from datetime import datetime, timedelta
 import reflex as rx
 import sqlmodel
 import secrets
+import io
+import csv
 
 from jeepney.low_level import padding
-from sqlmodel import select
+from sqlmodel import select, func
 
 from CrowdBid.components import header
 from CrowdBid.models import Auction, Bid
@@ -22,6 +24,7 @@ class EditAuctionState(rx.State):
     target_bid: str = ""
     round_end_mode: str = "auto"
     peek: bool = True  # Neue State-Variable
+    import_error: str = ""  # Für Fehlermeldungen beim Import
 
     @rx.event
     def validate_form(self):
@@ -68,8 +71,8 @@ class EditAuctionState(rx.State):
                 # Initialisiere die Formularfelder mit den aktuellen Werten
                 self.topic = self.auction.topic
                 self.target_bid = str(self.auction.target_bid)
-                self.round_end_mode = self.auction.round_end_mode or "auto"
-                self.peek = self.auction.peek or True  # Lade peek-Wert
+                self.round_end_mode = self.auction.round_end_mode
+                self.peek = self.auction.peek # Lade peek-Wert
                 # self.validate_form()
             else:
                 return rx.redirect("/")
@@ -97,6 +100,192 @@ class EditAuctionState(rx.State):
             session.delete(auction)
             session.commit()
         return rx.redirect("/")
+
+    def export_result_csv(self):
+        """Exportiert das Ergemiss der Auktion als CSV-Datei."""
+        with rx.session() as session:
+            subq = select(Bid.name, func.max(Bid.round).label("max_round")).where(Bid.ida == self.auction.id).group_by(Bid.name).subquery()
+            bids = session.exec(select(Bid).join(subq, (Bid.name == subq.c.name) & (Bid.round == subq.c.max_round)).where(Bid.ida == self.auction.id)).all()
+            csv_content = ""
+            for bid in bids:
+                csv_content += f"{bid.name};{bid.bid}\n"
+
+            return rx.download(
+                data=csv_content,
+                filename=f"auktionsergebnis_{self.auction.topic.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            )
+
+    def export_csv(self):
+        """Exportiert die Auktionsdaten als CSV-Datei."""
+        with rx.session() as session:
+            # Alle Gebote für diese Auktion holen
+            bids = session.exec(
+                select(Bid).where(Bid.ida == self.auction.id).order_by(Bid.name, Bid.round)
+            ).all()
+
+            # Daten nach Namen gruppieren
+            bid_data = {}
+            for bid in bids:
+                if bid.name not in bid_data:
+                    bid_data[bid.name] = []
+                if bid.round > 0:
+                    while len(bid_data[bid.name]) < bid.round - 1:
+                        bid_data[bid.name].append("")
+                    bid_data[bid.name].append(f"{bid.bid}")
+
+            # CSV-Daten erstellen
+            csv_content = ""
+            for name, bids_list in bid_data.items():
+                csv_content += f"{name};{';'.join(bids_list)}\n"
+
+            # CSV-Datei zum Download anbieten
+            filename = f"auktion_{self.auction.topic.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+            return rx.download(
+                data=csv_content,
+                filename=filename
+            )
+
+    async def handle_file_upload(self, files: list[rx.UploadFile]):
+        for file in files:
+            print(file.name)
+            try:
+                # Datei lesen
+                content = await file.read()
+                csv_text = content.decode('utf-8')
+
+                # CSV parsen
+                imported_data = []
+                for line in csv_text.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split(';')
+                        if len(parts) >= 2:  # Mindestens Name und ein Gebot
+                            name = parts[0].strip()
+                            bids = []
+                            for i, bid_str in enumerate(parts[1:], 1):
+                                if bid_str.strip():  # Nur nicht-leere Gebote
+                                    try:
+                                        bid_value = float(bid_str.strip())
+                                        bids.append((i, bid_value))
+                                    except ValueError:
+                                        continue
+                            if bids:  # Nur wenn mindestens ein Gebot vorhanden ist
+                                imported_data.append((name, bids))
+
+                if not imported_data:
+                    self.import_error = "Keine gültigen Daten in der CSV-Datei gefunden"
+                    return
+
+                # Alle vorhandenen Gebote löschen und neue erstellen
+                with rx.session() as session:
+                    # Alle Gebote für diese Auktion löschen
+                    existing_bids = session.exec(select(Bid).where(Bid.ida == self.auction.id)).all()
+                    for bid in existing_bids:
+                        session.delete(bid)
+
+                    # Neue Gebote erstellen
+                    current_time = datetime.now()
+                    for name, bids in imported_data:
+                        # Dummy-Eintrag für Runde 0 (zum Hinzufügen des Bieters)
+                        session.add(Bid(
+                            name=name,
+                            round=0,
+                            bid=0,
+                            ida=self.auction.id,
+                            time=current_time
+                        ))
+
+                        # Echte Gebote
+                        for round_num, bid_value in bids:
+                            session.add(Bid(
+                                name=name,
+                                round=round_num,
+                                bid=bid_value,
+                                ida=self.auction.id,
+                                time=current_time
+                            ))
+
+                    session.commit()
+
+                return rx.toast.success(
+                    f"CSV-Datei erfolgreich importiert! {len(imported_data)} Bieter wurden importiert.",
+                    title="Import erfolgreich",
+                )
+            except Exception as e:
+                self.import_error = f"Fehler beim Importieren: {str(e)}"
+                return rx.toast.error(
+                    "Fehler beim Importieren der CSV-Datei",
+                    title="Import fehlgeschlagen",
+                )
+
+    async def import_csv(self, form_data: dict):
+        """Importiert Auktionsdaten aus einer CSV-Datei."""
+        self.import_error = ""
+
+        csv_file = form_data.get("csv_file", None)
+        if not csv_file:
+            self.import_error = "Bitte wählen Sie eine CSV-Datei aus."
+            return
+
+        try:
+            # CSV-Datei lesen und verarbeiten
+            csv_text = csv_file.decode("utf-8")
+            csv_data = csv.reader(io.StringIO(csv_text), delimiter=";")
+
+            imported_data = []
+            for row in csv_data:
+                if row:
+                    name = row[0].strip()
+                    bids = []
+                    for i, bid_str in enumerate(row[1:], 1):
+                        try:
+                            bid_value = float(bid_str.strip())
+                            bids.append((i, bid_value))
+                        except ValueError:
+                            pass
+                    imported_data.append((name, bids))
+
+            with rx.session() as session:
+                # Alle Gebote für diese Auktion löschen
+                existing_bids = session.exec(select(Bid).where(Bid.ida == self.auction.id)).all()
+                for bid in existing_bids:
+                    session.delete(bid)
+
+                # Neue Gebote erstellen
+                current_time = datetime.now()
+                for name, bids in imported_data:
+                    # Dummy-Eintrag für Runde 0 (zum Hinzufügen des Bieters)
+                    session.add(Bid(
+                        name=name,
+                        round=0,
+                        bid=0,
+                        ida=self.auction.id,
+                        time=current_time
+                    ))
+
+                    # Echte Gebote
+                    for round_num, bid_value in bids:
+                        session.add(Bid(
+                            name=name,
+                            round=round_num,
+                            bid=bid_value,
+                            ida=self.auction.id,
+                            time=current_time
+                        ))
+
+                session.commit()
+
+            return rx.toast.success(
+                f"CSV-Datei erfolgreich importiert! {len(imported_data)} Bieter wurden importiert.",
+                title="Import erfolgreich",
+            )
+
+        except Exception as e:
+            self.import_error = f"Fehler beim Importieren: {str(e)}"
+            return rx.toast.error(
+                "Fehler beim Importieren der CSV-Datei",
+                title="Import fehlgeschlagen",
+            )
 
     def copy_bid_url(self):
         """Kopiert die Bid URL und zeigt eine Toast-Benachrichtigung."""
@@ -257,7 +446,7 @@ def edit_page_ui():
                                 rx.text(
                                     rx.flex(
                                         rx.radio_group.item(value="manual_last"),
-                                        "Manuelles Beenden nach dem letzten Gebot",
+                                        "Manuelles Beenden, nach dem letzten Gebot",
                                         spacing="2"
                                     ),
                                     as_="label"
@@ -265,11 +454,20 @@ def edit_page_ui():
                                 rx.text(
                                     rx.flex(
                                         rx.radio_group.item(value="manual_first"),
-                                        "Manuelles Beenden nach Rundenstart",
+                                        "Manuelles Beenden möglich, nach Rundenstart",
                                         spacing="2"
                                     ),
                                     as_="label"
                                 ),
+                                # rx.text(
+                                #     rx.flex(
+                                #         rx.radio_group.item(value="edit"),
+                                #         "Nur Hier in den Einstellungen möglich",
+                                #         spacing="2",
+                                #         disabled=True,
+                                #     ),
+                                #     as_="label"
+                                # ),
                                 name="round_end_mode",
                                 value=EditAuctionState.round_end_mode,
                                 on_change=EditAuctionState.handle_round_end_mode_change,
@@ -277,6 +475,11 @@ def edit_page_ui():
                                 spacing="3",
                                 size="3"
                             ),
+                            # rx.button(
+                            #     "Manuell aktuelle Runde Beenden",
+                            #     disabled=True,
+                            #     height="25px"
+                            # ),
                             align_items="start",
                             width="100%"
                         ),
@@ -285,9 +488,9 @@ def edit_page_ui():
                     ),
                     rx.flex(
                         rx.vstack(
-                            rx.text.strong("Optionen"),
+                            rx.text.strong("Sichtbarkeit"),
                             rx.checkbox(
-                                "Gebote während der Runde sichtbar (Peek)",
+                                "Beendete Runden können eingesehen werden",
                                 checked=EditAuctionState.peek,
                                 on_change=EditAuctionState.handle_peek_change,
                                 name="peek",
@@ -356,11 +559,102 @@ def edit_page_ui():
             padding="6",
         ),
 
-        # Delete Card
+        # Export & Import & Delete Card
         rx.card(
             rx.vstack(
-                rx.heading(""),
+                rx.heading("Aktionen", size="6", weight="medium"),
                 rx.divider(),
+                # Export Button
+                rx.button(
+                    rx.icon("download"),
+                    "Ergemnisse Als CSV exportieren",
+                    on_click=EditAuctionState.export_result_csv,
+                    color_scheme="green",
+                    variant="outline",
+                    size="3",
+                    width="100%"
+                ),
+                # Export Button
+                rx.button(
+                    rx.icon("download"),
+                    "Auktion als CSV exportieren",
+                    on_click=EditAuctionState.export_csv,
+                    color_scheme="blue",
+                    variant="outline",
+                    size="3",
+                    width="100%"
+                ),
+                # Import Button mit Warning Dialog
+                rx.alert_dialog.root(
+                    rx.alert_dialog.trigger(
+                        rx.button(
+                            rx.icon("upload"),
+                            "Aktion als CSV importieren",
+                            color_scheme="orange",
+                            variant="outline",
+                            size="3",
+                            width="100%"
+                        ),
+                    ),
+                    rx.alert_dialog.content(
+                        rx.alert_dialog.title("CSV-Datei importieren"),
+                        rx.alert_dialog.description(
+                            "Achtung: Alle vorhandenen Gebote werden gelöscht und durch die importierten Daten ersetzt. Dieser Vorgang kann nicht rückgängig gemacht werden.",
+                        ),
+                        rx.vstack(
+                            rx.upload(
+                                rx.cond(
+                                    rx.selected_files("upload"),
+                                    rx.vstack(
+                                        rx.icon("file-check", size=48, color="green"),
+                                        rx.selected_files("upload"),
+                                        align="center",
+                                    ),
+                                    rx.vstack(
+                                        rx.icon("file-question", size=48),
+                                        " CSV-Datei auswählen",
+                                        align="center",
+                                    )
+                                ),
+                                id="upload",
+                                margin="2em",
+                                accept=".csv",
+                                multiple=False,
+                            ),
+                            rx.flex(
+                                rx.alert_dialog.action(
+                                    rx.button(
+                                        "Upload",
+                                        variant="soft",
+                                        size="2",
+                                        on_click=EditAuctionState.handle_file_upload(rx.upload_files("upload")),
+                                        disabled=~rx.selected_files("upload"),
+                                    ),
+                                ),
+                                rx.spacer(),
+                                rx.alert_dialog.cancel(
+                                    rx.button(
+                                        "Abbrechen",
+                                        on_click=rx.clear_selected_files("upload"),
+                                        variant="soft",
+                                        size="2"
+                                    ),
+                                ),
+                                spacing="3",
+                                margin_top="16px",
+                                justify="end",
+                                width="100%",
+                            ),
+                            spacing="3",
+                            width="100%",
+                            align="center",
+                        ),
+                    ),
+
+                ),
+                rx.divider(),
+                rx.divider(),
+                # Delete Button
                 rx.alert_dialog.root(
                     rx.alert_dialog.trigger(
                         rx.button(
@@ -398,6 +692,8 @@ def edit_page_ui():
                         ),
                     ),
                 ),
+                spacing="4",
+                width="100%",
             ),
             width="100%",
             max_width="600px",
