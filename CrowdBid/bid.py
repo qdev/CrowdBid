@@ -84,7 +84,7 @@ class BidState(rx.State):
             with rx.session() as session:
                 session.merge(Bid(name=form_data["name"], round=self.actual_round, bid=float(form_data["bid"]), ida=self.auction.id, time=datetime.now()))
                 session.commit()
-            return BidState.send_ws(f"{form_data["name"]} hat ein Gebot abgegeben.")
+            return BidState.send_ws(f"{form_data['name']} hat ein Gebot abgegeben.")
         except Exception as e:
             print(f"Error: {str(e)}")
             self.load_bids()
